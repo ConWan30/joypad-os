@@ -14,6 +14,13 @@
 #include <stdio.h>
 #include <string.h>
 
+// QorTroller raw-sensor tap (additive — zero-cost when hook not registered).
+// DESIGN: joypad-os output path is NEVER modified by this include.
+// The hook fires pre-normalization, pre-debounce, and is a pure side-channel.
+#ifdef CONFIG_QORTROLLER
+#include "qortroller/qortroller_hook.h"
+#endif
+
 // I2C expander support (RP2040-only — uses pico-sdk I2C directly)
 #if !defined(PLATFORM_ESP32) && !defined(PLATFORM_NRF)
 #include "pico/stdlib.h"
@@ -277,10 +284,28 @@ static bool pad_read_button(int16_t pin, bool active_high) {
 #define ADC_STICK_MAX  3000  // Maximum ADC value at full deflection
 #define ADC_STICK_CENTER 2048
 
+// ============================================================================
+// QORTROLLER RAW ADC STATE — pre-normalization values per axis
+// Populated by pad_read_adc_raw() before normalization; consumed by
+// pad_emit_qortroller_hook() once all axes are read for this poll cycle.
+// Only compiled when CONFIG_QORTROLLER is defined.
+// ============================================================================
+#ifdef CONFIG_QORTROLLER
+static uint16_t _qt_raw_adc[6] = {0};  // indices match POAC_AXIS_* enum
+static uint32_t _qt_raw_buttons = 0;   // pre-debounce, set in pad_poll_device
+#endif
+
+// Read raw 12-bit ADC value (pre-normalization).
+// Returns 0-4095. Used by the QorTroller hook path.
+static uint16_t pad_read_adc_raw(int8_t channel) {
+    if (channel < 0 || channel > 3) return ADC_STICK_CENTER;
+    return platform_adc_read(channel);  // 12-bit: 0-4095
+}
+
 static uint8_t pad_read_adc(int8_t channel, bool invert) {
     if (channel < 0 || channel > 3) return 128;  // Centered
 
-    uint16_t raw = platform_adc_read(channel);  // 12-bit: 0-4095
+    uint16_t raw = pad_read_adc_raw(channel);
 
     // Scale from joystick's actual range to full 0-255
     // Clamp to expected range first
@@ -576,6 +601,21 @@ static void pad_poll_device(uint8_t device_index) {
     // Read analog sticks (ADC overrides dpad-to-stick if both present)
     uint8_t dz = config->deadzone;
 
+#ifdef CONFIG_QORTROLLER
+    // Capture raw ADC values BEFORE normalization/deadzone for QorTroller
+    // biometric pipeline. These are 12-bit counts (0-4095), unclipped,
+    // undebounced, and unscaled — the biometric signal lives here, not in
+    // the normalized 0-255 values that joypad-os outputs to USB/BLE.
+    if (config->adc_lx >= 0) _qt_raw_adc[POAC_AXIS_LX] = pad_read_adc_raw(config->adc_lx);
+    if (config->adc_ly >= 0) _qt_raw_adc[POAC_AXIS_LY] = pad_read_adc_raw(config->adc_ly);
+    if (config->adc_rx >= 0) _qt_raw_adc[POAC_AXIS_RX] = pad_read_adc_raw(config->adc_rx);
+    if (config->adc_ry >= 0) _qt_raw_adc[POAC_AXIS_RY] = pad_read_adc_raw(config->adc_ry);
+    if (config->adc_lt >= 0) _qt_raw_adc[POAC_AXIS_L2] = pad_read_adc_raw(config->adc_lt);
+    if (config->adc_rt >= 0) _qt_raw_adc[POAC_AXIS_R2] = pad_read_adc_raw(config->adc_rt);
+    // Pre-debounce button state (buttons variable was set above, before debounce filter)
+    _qt_raw_buttons = pad_prev_buttons[device_index];  // previous = pre-debounce of THIS read
+#endif
+
     if (config->adc_lx >= 0) {
         event->analog[ANALOG_LX] = apply_deadzone(
             pad_read_adc(config->adc_lx, config->invert_lx), dz);
@@ -600,6 +640,21 @@ static void pad_poll_device(uint8_t device_index) {
     if (config->adc_rt >= 0) {
         event->analog[ANALOG_R2] = pad_read_adc(config->adc_rt, false);
     }
+
+#ifdef CONFIG_QORTROLLER
+    // Emit raw sample to QorTroller hook (fires AFTER all ADC reads, so the
+    // sample is complete; fires BEFORE router_submit_input so joypad-os output
+    // is unaffected regardless of what the hook does).
+    if (qortroller_hook_enabled()) {
+        poac_raw_sample_t qt_sample = {0};
+        memcpy(qt_sample.adc_raw, _qt_raw_adc, sizeof(_qt_raw_adc));
+        qt_sample.buttons_raw = _qt_raw_buttons;
+        // IMU fields (accel/gyro) are filled by the sense task's IMU poll,
+        // not here — pad_input.c has no IMU driver. The hook merges them.
+        qt_sample.timestamp_us = platform_get_time_us();
+        qortroller_hook_submit(&qt_sample);
+    }
+#endif
 
     // Right hat → right analog stick (digital 4-direction → 0/128/255)
     // Used by Alpakka and similar controllers with a directional hat for the right stick.
