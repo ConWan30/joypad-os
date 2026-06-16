@@ -7,10 +7,10 @@ if(CONFIG_QORTROLLER)
         SRCS
             "qortroller_hook.c"
             "poac_builder.c"
-            # sense_task.c      — add when Core-0 FreeRTOS task is implemented
-            # uwb_presence.c    — add when QM35825DK-05 eval kit is connected
-            # atca_signer.c     — add when ATECC608B breakout is wired (Path A Arc 2)
-            # bridge_transport.c — add with BLE GATT characteristic implementation
+            "sense_task.c"
+            "atca_signer.c"
+            "bridge_transport.c"
+            "uwb_presence.c"
         INCLUDE_DIRS
             "."
         REQUIRES
@@ -18,8 +18,8 @@ if(CONFIG_QORTROLLER)
             freertos
             esp_timer
         PRIV_REQUIRES
-            # cryptoauthlib  — uncomment when atca_signer.c is added
-            # esp_wifi       — uncomment when bridge_transport.c WiFi path is added
+            # cryptoauthlib  — define CRYPTOAUTHLIB_PRESENT when ATECC608B is wired (Arc 2)
+            # esp_wifi       — add when WiFi fallback path is enabled in bridge_transport.c
     )
 
     # Compile-time assertion: PoAC wire format must be exactly 228 bytes.
